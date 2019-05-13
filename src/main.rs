@@ -27,8 +27,14 @@ impl PassthruFS {
     }
 
     fn stat(&self, path: &PathBuf) -> io::Result<FileAttr> {
+      info!("stat {:?}", path);
       let attr = fs::metadata(path)?;
-      Ok(FileAttr {
+      
+      let file_type = match attr.is_dir() {
+        true => FileType::Directory,
+        false => FileType::RegularFile
+      };
+      let file_attr = FileAttr {
         ino: attr.st_ino(),
         size: attr.st_size(),
         blocks: attr.st_blocks(),
@@ -36,14 +42,16 @@ impl PassthruFS {
         mtime: Timespec {sec: attr.st_mtime(), nsec: attr.st_mtime_nsec() as i32},
         ctime: Timespec {sec: attr.st_ctime(), nsec: attr.st_ctime_nsec() as i32},
         crtime: Timespec {sec: 0, nsec: 0},
-        kind: FileType::Directory,
+        kind: file_type,
         perm: attr.st_mode() as u16,
         nlink: attr.st_nlink() as u32,
         uid: attr.st_uid(),
         gid: attr.st_gid(),
         rdev: attr.st_rdev() as u32,
         flags: 0,
-      })
+      };
+      info!("file_attr {:?}", file_attr);
+      Ok(file_attr)
     }
 }
 
@@ -54,6 +62,54 @@ impl Filesystem for PassthruFS {
             1 => reply.attr(&TTL, &self.stat(&self.sourceroot).unwrap()),
             _ => reply.error(ENOENT)
         }
+    }
+
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        info!("lookup {} {:?}", parent, name);
+        match &self.stat(&self.sourceroot.join(name)) {
+            Ok(stat) => reply.entry(&TTL, stat, 0),
+            _ => reply.error(ENOENT)
+        };
+        //reply.entry(&TTL, &self.stat(&self.sourceroot.join(name)).unwrap(), 0);
+    }
+
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+        info!("readdir {} {}", ino, offset);
+        if ino != 1 {
+            reply.error(ENOENT);
+            return;
+        }
+        let mut entries = vec![ (1, FileType::Directory, String::from(".")), (1, FileType::Directory, String::from("..")) ];
+        for entry in fs::read_dir(&self.sourceroot).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let attr = fs::metadata(&path).unwrap();
+            let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let file_type = match attr.is_dir() {
+                true => FileType::Directory,
+                false => FileType::RegularFile
+            };
+            
+            entries.push((attr.st_ino(), file_type, file_name));
+        }
+        info!("entries: {:?}", entries);
+        
+        // Offset of 0 means no offset.
+        // Non-zero offset means the passed offset has already been seen, and we should start after
+        // it.
+        let to_skip = if offset == 0 { offset } else { offset + 1 } as usize;
+        for (i, entry) in entries.into_iter().enumerate().skip(to_skip) {
+            info!("reply {}, {}, {:?}, {}", entry.0, i as i64, entry.1, entry.2);
+            let r = reply.add(entry.0, i as i64, entry.1, entry.2);
+            info!("r {}", r);
+        }
+        reply.ok();
+    }
+
+    fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyData) {
+        info!("read(ino={}, fh={}, offset={}, size={})", ino, fh, offset, size);
+        let bytes: &[u8] = &fs::read("src/main.rs").unwrap();
+        reply.data(bytes);
     }
 }
 
