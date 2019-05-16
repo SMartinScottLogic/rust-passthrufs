@@ -4,26 +4,30 @@ extern crate env_logger;
 
 use std::env;
 use std::{fs,io};
+use std::io::prelude::*;
+use std::io::SeekFrom;
+use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
-use std::ffi::OsStr;
+use std::ffi::{OsStr,OsString};
 use std::time::SystemTime;
 use time::Timespec;
 use libc::ENOENT;
 use std::os::linux::fs::MetadataExt;
-
+use std::collections::HashMap;
 use fuse::{FileType, FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
 
 const TTL: Timespec = Timespec { sec: 1, nsec: 0}; // 1 second
 
 #[derive(Debug)]
 struct PassthruFS {
-    sourceroot: PathBuf
+    sourceroot: PathBuf,
+    inodes: HashMap<u64, OsString>
 }
 
 impl PassthruFS {
     fn new(sourceroot: &OsStr) -> PassthruFS {
-      PassthruFS { sourceroot: PathBuf::from(sourceroot) }
+      PassthruFS { sourceroot: PathBuf::from(sourceroot), inodes: HashMap::new() }
     }
 
     fn stat(&self, path: &PathBuf) -> io::Result<FileAttr> {
@@ -67,7 +71,7 @@ impl Filesystem for PassthruFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         info!("lookup {} {:?}", parent, name);
         match &self.stat(&self.sourceroot.join(name)) {
-            Ok(stat) => reply.entry(&TTL, stat, 0),
+            Ok(stat) => {self.inodes.insert(stat.ino, name.to_os_string());reply.entry(&TTL, stat, 0)},
             _ => reply.error(ENOENT)
         };
         //reply.entry(&TTL, &self.stat(&self.sourceroot.join(name)).unwrap(), 0);
@@ -108,8 +112,22 @@ impl Filesystem for PassthruFS {
 
     fn read(&mut self, _req: &Request, ino: u64, fh: u64, offset: i64, size: u32, reply: ReplyData) {
         info!("read(ino={}, fh={}, offset={}, size={})", ino, fh, offset, size);
-        let bytes: &[u8] = &fs::read("src/main.rs").unwrap();
-        reply.data(bytes);
+        info!("    {:?}", self.inodes.get(&ino));
+        match self.inodes.get(&ino) {
+            Some(path) => {
+                let mut f = File::open(&self.sourceroot.join(path)).unwrap();
+                f.seek(SeekFrom::Start(offset as u64));
+                let mut handle = f.take(size.into());
+                let mut buffer = Vec::new();
+                handle.read_to_end(&mut buffer);
+                reply.data(&buffer);
+                /*
+                let bytes: &[u8] = &fs::read(&self.sourceroot.join(path)).unwrap();
+                reply.data(&bytes[(offset as usize)..((offset+size as i64) as usize)]);
+                */
+            },
+            _ => reply.error(ENOENT)
+        };
     }
 }
 
